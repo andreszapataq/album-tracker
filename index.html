@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Control de Láminas</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -304,6 +305,30 @@
     color: var(--text-muted);
     margin-bottom: 0.5rem;
   }
+
+  .album-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--surface2);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 0.5px solid var(--border);
+  }
+
+  .album-item:hover { background: var(--border); }
+
+  .album-item-name {
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .album-item-info {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
 </style>
 </head>
 <body>
@@ -315,6 +340,11 @@
 
 <div class="card" id="setup-card">
   <div id="setup">
+    <div id="album-list-section" style="display:none;">
+      <label>Álbumes guardados</label>
+      <div id="album-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;"></div>
+    </div>
+    <div class="section-label" id="new-album-label">Crear nuevo álbum</div>
     <div>
       <label>Nombre del álbum</label>
       <input type="text" id="album-name" placeholder="Ej: Mundial 2026">
@@ -323,7 +353,7 @@
       <label>Total de láminas</label>
       <input type="number" id="total-input" min="1" max="1000" placeholder="Ej: 638">
     </div>
-    <button id="init-btn" onclick="initAlbum()">Crear / Cargar álbum</button>
+    <button id="init-btn" onclick="createAlbum()">Crear álbum</button>
   </div>
 </div>
 
@@ -371,38 +401,74 @@
 </div>
 
 <script>
-  let state = { name: '', total: 0, cells: [] };
+  const SUPABASE_URL = 'https://hjunjcesggioexezniqx.supabase.co';
+  const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhqdW5qY2VzZ2dpb2V4ZXpuaXF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MDYxOTcsImV4cCI6MjA5MTE4MjE5N30.Al7vz249AaWr1KOd8TlutnJRiK5I6WlwHgI93zfijIQ';
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  let state = { id: null, name: '', total: 0, cells: [] };
   let curFilter = 'all';
   let tapTimers = {};
+  let saveTimeout = null;
 
-  function key(name) {
-    return 'album_' + name.replace(/\s+/g,'_').toLowerCase();
+  // Debounced save to avoid excessive DB writes
+  function scheduleSave() {
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => saveState(), 300);
   }
 
-  function saveState() {
-    localStorage.setItem(key(state.name), JSON.stringify(state));
-    localStorage.setItem('album_last', key(state.name));
+  async function saveState() {
+    const { error } = await sb
+      .from('albums')
+      .update({ cells: state.cells })
+      .eq('id', state.id);
+    if (error) console.error('Error guardando:', error.message);
   }
 
-  function loadState(k) {
-    const raw = localStorage.getItem(k);
-    return raw ? JSON.parse(raw) : null;
+  async function loadAlbumList() {
+    const { data, error } = await sb
+      .from('albums')
+      .select('id, name, total, cells')
+      .order('updated_at', { ascending: false });
+
+    if (error) {
+      console.error('Error cargando álbumes:', error.message);
+      return [];
+    }
+    return data || [];
   }
 
-  function initAlbum() {
+  async function createAlbum() {
     const name = document.getElementById('album-name').value.trim();
     const total = parseInt(document.getElementById('total-input').value);
     if (!name) { alert('Escribe el nombre del álbum.'); return; }
     if (!total || total < 1) { alert('Ingresa el número total de láminas.'); return; }
-    const k = key(name);
-    const saved = loadState(k);
-    if (saved && saved.total === total) {
-      state = saved;
-    } else {
-      if (saved && saved.total !== total && !confirm('Ya existe un álbum con ese nombre pero diferente cantidad. ¿Crear uno nuevo?')) return;
-      state = { name, total, cells: Array(total).fill(0) };
-      saveState();
+
+    const cells = Array(total).fill(0);
+    const { data, error } = await sb
+      .from('albums')
+      .insert({ name, total, cells })
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === '23505') {
+        alert('Ya existe un álbum con ese nombre. Selecciónalo de la lista.');
+      } else {
+        alert('Error creando álbum: ' + error.message);
+      }
+      return;
     }
+
+    state = { id: data.id, name: data.name, total: data.total, cells: data.cells };
+    openTracker();
+  }
+
+  function loadAlbum(album) {
+    state = { id: album.id, name: album.name, total: album.total, cells: album.cells };
+    openTracker();
+  }
+
+  function openTracker() {
     document.getElementById('album-display').textContent = state.name;
     document.getElementById('setup-card').style.display = 'none';
     document.getElementById('tracker').style.display = 'block';
@@ -439,16 +505,14 @@
     if (tapTimers[i]) {
       clearTimeout(tapTimers[i]);
       delete tapTimers[i];
-      // double tap → repeated
       state.cells[i] = state.cells[i] === 2 ? 1 : 2;
-      saveState(); refreshCells(); applyFilter(); updateStats();
+      scheduleSave(); refreshCells(); applyFilter(); updateStats();
     } else {
       tapTimers[i] = setTimeout(() => {
         delete tapTimers[i];
-        // single tap → toggle have/miss
         state.cells[i] = state.cells[i] === 0 ? 1 : 0;
         if (state.cells[i] === 0 && el.classList.contains('repeated')) state.cells[i] = 0;
-        saveState(); refreshCells(); applyFilter(); updateStats();
+        scheduleSave(); refreshCells(); applyFilter(); updateStats();
       }, 280);
     }
   }
@@ -493,7 +557,7 @@
 
   function markAll(v) {
     state.cells = state.cells.map(() => v ? 1 : 0);
-    saveState(); refreshCells(); applyFilter(); updateStats();
+    scheduleSave(); refreshCells(); applyFilter(); updateStats();
   }
 
   function showMissing() {
@@ -501,31 +565,66 @@
     const missing = state.cells.map((v,i) => v === 0 ? i+1 : null).filter(Boolean);
     area.style.display = 'block';
     area.textContent = missing.length === 0
-      ? '¡Álbum completo! 🎉'
+      ? '¡Álbum completo!'
       : 'Faltan ' + missing.length + ': ' + missing.join(', ');
   }
 
-  function resetAlbum() {
+  async function resetAlbum() {
     if (!confirm('¿Reiniciar el álbum? Se perderá todo el progreso.')) return;
     state.cells = Array(state.total).fill(0);
-    saveState(); refreshCells(); updateStats();
+    await saveState();
+    refreshCells(); updateStats();
     document.getElementById('export-area').style.display = 'none';
   }
 
-  function changeAlbum() {
+  async function changeAlbum() {
     document.getElementById('setup-card').style.display = 'block';
     document.getElementById('tracker').style.display = 'none';
+    document.getElementById('export-area').style.display = 'none';
+    await renderAlbumList();
   }
 
-  window.onload = () => {
-    const lastKey = localStorage.getItem('album_last');
-    if (lastKey) {
-      const saved = loadState(lastKey);
-      if (saved) {
-        document.getElementById('album-name').value = saved.name;
-        document.getElementById('total-input').value = saved.total;
-      }
+  async function deleteAlbum(id, name, e) {
+    e.stopPropagation();
+    if (!confirm('¿Eliminar el álbum "' + name + '"? Esta acción no se puede deshacer.')) return;
+    const { error } = await sb.from('albums').delete().eq('id', id);
+    if (error) { alert('Error eliminando: ' + error.message); return; }
+    if (state.id === id) {
+      state = { id: null, name: '', total: 0, cells: [] };
+      document.getElementById('tracker').style.display = 'none';
     }
+    await renderAlbumList();
+  }
+
+  async function renderAlbumList() {
+    const albums = await loadAlbumList();
+    const section = document.getElementById('album-list-section');
+    const list = document.getElementById('album-list');
+    list.innerHTML = '';
+
+    if (albums.length === 0) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = 'block';
+    albums.forEach(a => {
+      const have = a.cells.filter(x => x === 1 || x === 2).length;
+      const pct = Math.round((have / a.total) * 100);
+      const item = document.createElement('div');
+      item.className = 'album-item';
+      item.onclick = () => loadAlbum(a);
+      item.innerHTML =
+        '<div><div class="album-item-name">' + a.name + '</div>' +
+        '<div class="album-item-info">' + a.total + ' láminas · ' + pct + '% completado</div></div>' +
+        '<button onclick="deleteAlbum(' + a.id + ',\'' + a.name.replace(/'/g, "\\'") + '\',event)" ' +
+        'style="padding:4px 8px;font-size:11px;color:#A32D2D;border-color:rgba(163,45,45,0.3);min-width:auto;">Eliminar</button>';
+      list.appendChild(item);
+    });
+  }
+
+  window.onload = async () => {
+    await renderAlbumList();
   };
 </script>
 </body>
